@@ -202,7 +202,7 @@ var switchPage = template.Must(template.New("switch").Parse(`<!doctype html>
 func (a *app) manage(w http.ResponseWriter, r *http.Request, s session, ok bool) {
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("Referrer-Policy", "same-origin")
 	switch r.URL.Path {
 	case "/switch", "/switch/":
 		if r.Method != "GET" && r.Method != "HEAD" {

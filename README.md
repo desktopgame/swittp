@@ -70,3 +70,9 @@ Windows の race 検証には CGO と対応 C コンパイラが必要です。�
 - `gofmt`、`go test -count=1 ./...`（全 9 テストとサブテスト）、`go vet ./...`、`go build -o swittp.exe .` は成功。
 - `go test -race ./...` は検証未完了。標準状態は CGO 無効。既存 clang 18 は Windows リンカーの COMDAT エラー、既存 Zig 0.16 は `WaitOnAddress` などの未解決シンボルでリンク失敗。`-lsynchronization` を補っても、そのライブラリが同ツールチェーンにありませんでした。race テスト本体は実行できていません。
 - Go / OS の永続設定変更やツールの追加インストールはしていません。
+
+## 管理画面の Origin エラーの修正
+
+管理画面の `Referrer-Policy` は `same-origin` とします。以前の `no-referrer` は、通常のフォーム POST の `Origin` を `null` にするため、正しいセッションと CSRF トークンがあっても選択操作が拒否される原因になります。POST 必須、Origin 検証、CSRF トークン検証は維持しています。
+
+回帰テストは HTTP ヘッダーを明示して送るモックテストです。拒否された POST が選択を変更せず、正常な POST が 303 を返して続くルート GET が上流に届くことを確認しています。実ブラウザでの再現確認と、報告者が使用したアクセス URL の確認は未完了です。HTTPS 終端や外部 Host の対応を追加した修正ではありません。
