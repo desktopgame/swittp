@@ -32,7 +32,7 @@ go build -o swittp.exe .
 - `external_origins`: 省略時は空配列でローカル専用。例: `["https://your-device.your-tailnet.ts.net"]`。外側のブラウザ URL の Origin を完全一致で許可します。小文字の `http://` または `https://` とホスト、必要なら非標準ポートを指定します。末尾 `/`、パス、クエリ、フラグメント、ユーザー情報、ワイルドカード、重複 Host は不可。既定ポート（HTTP の `:80`、HTTPS の `:443`）は省略してください。同じ Host に HTTP と HTTPS を同時登録することはできません。
 - `services`: `id`、表示用の `name`、転送先の `url`。ID は英数字・ハイフン・アンダースコアの 1～64 文字で、一意にします。クライアントから URL を指定して転送先を追加することはできません。
 - URL は `http` / `https` のルートのみ。ユーザー情報、サブパス、クエリ、フラグメントは不可。設定ファイルを編集できる人を信頼する前提です。上流 URL はループバックに限定していませんが、サンプルはループバックのみです。
-- HTTP メソッド、本文、エスケープ済みパス、クエリを中継します。転送先の Host を使用し、環境変数の HTTP プロキシは使用しません。
+- HTTP メソッド、本文、エスケープ済みパス、クエリを中継します。既定では転送先の Host を使用し、環境変数の HTTP プロキシは使用しません。サービスに `"preserve_host": true` を指定した場合だけ、入口で検証済みの元の Host を保持します。省略または `false` なら従来どおりです。接続先は常に設定された `url` で、Host から接続先を選びません。
 - `/switch` と `/switch/` は管理画面、`POST /switch/select` は選択変更です。`/switch/` 以下はすべて予約し、不明な管理パスは 404 にします。上流が同じパスを使う場合はアクセスできません。`/switchboard` は通常どおり上流に送ります。
 - 未選択のブラウザナビゲーション（GET/HEAD で navigate または Accept に text/html）は `/switch` へ 303。それ以外は 409。元のページへの自動復帰は行いません。
 - 選択はランダムなセッション ID とアクセスした Origin にひも付け、メモリ内に保持します。`swittp_session` Cookie は HttpOnly、SameSite=Strict、Path=/、Domain 未指定。設定上 HTTPS の外部 Origin では Secure を付けます。ローカルおよび明示設定した HTTP Origin では付けません。別 Origin へのセッション流用は拒否します。同じホストの別ポートでは Cookie 自体を共有するブラウザ仕様のため、複数ポートを使うと再選択が必要になり得ます。セッションは作成から 12 時間、最大 1024 件。再起動で選択は失われます。上流の同名 Set-Cookie は除きます。
@@ -73,7 +73,25 @@ tailscale serve --bg 8787
 
 ブラウザで `https://実際の端末名.実際のtailnet.ts.net/switch` を開きます。swittp 全体をルートに置くため `--set-path /switch` は使いません。`listen` を Tailscale IP に変更する必要はありません。Host の書き換えや Origin の削除で検証を回避しないでください。
 
-上流には上流自身の Host と、ブラウザの元の Origin が届きます。外部 HTTPS の情報は上記の2つの転送ヘッダーで伝えますが、それを利用するかは上流アプリ次第です。上流側にも正しい外部 URL・信頼するプロキシ・許可 Origin の設定が必要な場合があります。Origin、Location、HTML 内の URL は自動で書き換えません。
+上流には既定で上流自身の Host と、ブラウザの元の Origin が届きます。`preserve_host` が有効なサービスには検証済みの元の Host が届きます。外部 HTTPS の情報は上記の2つの転送ヘッダーでも伝えますが、それを利用するかは上流アプリ次第です。上流側にも正しい外部 URL・信頼するプロキシ・許可 Origin の設定が必要な場合があります。Origin、Location、HTML 内の URL は自動で書き換えません。
+
+### swittp経由でDashを使う場合
+
+Dashは実際のHostと設定Originを対応させて検証し、転送ヘッダーでHostを置き換えません。Tailscale → swittp → Dashの構成では、`config.tailscale.example.json` のようにDashのサービスだけ次の設定を有効にします。
+
+```json
+{"id": "dash", "name": "Dash", "url": "http://127.0.0.1:4173", "preserve_host": true}
+```
+
+swittpの `external_origins` とDashの追加Originには、実際にブラウザーで開く同じHTTPS Originを指定します。例のホスト名は置き換え、`/switch` などのパスは含めません。Dash側の既存 `DASH_ORIGIN` は維持し、使用中のDashリポジトリの `.env` に次を指定します。
+
+```dotenv
+DASH_ADDITIONAL_ORIGINS=https://your-device.your-tailnet.ts.net
+```
+
+この設定はDashのHost／Origin／CSRFチェックを緩めません。loopbackのOriginを追加するだけでは、外側のOriginと上流Hostの不一致は解決しません。他のサービスは上流Hostが必要な場合があるので、一律に有効化しないでください。HTTPS上流へのTLS接続先・証明書検証も引き続き設定URLが基準です。
+
+Host保持は認証やアプリ間の隔離ではありません。切り替えるアプリは同一ブラウザーOriginを共有し、Cookie・localStorage・Service Workerなどが干渉します。互いに同程度に信頼できるアプリだけを登録し、管理機能を含む外側のアクセス制御と、各上流の認証は引き続き必要です。実際の設定・実行ファイルへの反映と再起動は利用者が別途行います。
 
 開発時の検証は HTTP ループバックの模擬プロキシで外部 Host/Origin を渡す統合テストです。実際の Tailscale やブラウザの TLS・Cookie 挙動を検証したものではありません。利用者の実ホスト名と実行時設定は変更していません。
 

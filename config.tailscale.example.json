@@ -3,6 +3,6 @@
   "external_origins": ["https://your-device.your-tailnet.ts.net"],
   "services": [
     {"id": "app-a", "name": "ローカルアプリ A", "url": "http://127.0.0.1:3000"},
-    {"id": "app-b", "name": "ローカルアプリ B", "url": "http://127.0.0.1:8080"}
+    {"id": "dash", "name": "Dash", "url": "http://127.0.0.1:4173", "preserve_host": true}
   ]
 }

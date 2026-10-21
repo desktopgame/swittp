@@ -27,9 +27,10 @@ const sessionTTL = 12 * time.Hour
 const maxSessions = 1024
 
 type service struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	URL  string `json:"url"`
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	URL          string `json:"url"`
+	PreserveHost bool   `json:"preserve_host,omitempty"`
 }
 
 type config struct {
@@ -157,6 +158,10 @@ func newApp(c config) (*app, error) {
 					}
 				}
 				pr.SetURL(u)
+				if s.PreserveHost {
+					// ServeHTTP already validated this Host. The transport destination stays fixed.
+					pr.Out.Host = pr.In.Host
+				}
 				// External context is fixed by configuration, not by caller-supplied proxy headers.
 				if external := a.origins[pr.In.Host]; external != "http://"+c.Listen && external != "http://"+net.JoinHostPort("localhost", port) {
 					pr.Out.Header.Set("X-Forwarded-Host", pr.In.Host)
