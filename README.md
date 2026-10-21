@@ -29,15 +29,16 @@ go build -o swittp.exe .
 ## 設定と動作
 
 - `listen`: 省略時 `127.0.0.1:8787`。明示的なループバック IP と 1～65535 のポートが必要です。`0.0.0.0` や LAN/Tailscale アドレスでは起動できません。
+- `external_origins`: 省略時は空配列でローカル専用。例: `["https://your-device.your-tailnet.ts.net"]`。外側のブラウザ URL の Origin を完全一致で許可します。小文字の `http://` または `https://` とホスト、必要なら非標準ポートを指定します。末尾 `/`、パス、クエリ、フラグメント、ユーザー情報、ワイルドカード、重複 Host は不可。既定ポート（HTTP の `:80`、HTTPS の `:443`）は省略してください。同じ Host に HTTP と HTTPS を同時登録することはできません。
 - `services`: `id`、表示用の `name`、転送先の `url`。ID は英数字・ハイフン・アンダースコアの 1～64 文字で、一意にします。クライアントから URL を指定して転送先を追加することはできません。
 - URL は `http` / `https` のルートのみ。ユーザー情報、サブパス、クエリ、フラグメントは不可。設定ファイルを編集できる人を信頼する前提です。上流 URL はループバックに限定していませんが、サンプルはループバックのみです。
 - HTTP メソッド、本文、エスケープ済みパス、クエリを中継します。転送先の Host を使用し、環境変数の HTTP プロキシは使用しません。
 - `/switch` と `/switch/` は管理画面、`POST /switch/select` は選択変更です。`/switch/` 以下はすべて予約し、不明な管理パスは 404 にします。上流が同じパスを使う場合はアクセスできません。`/switchboard` は通常どおり上流に送ります。
 - 未選択のブラウザナビゲーション（GET/HEAD で navigate または Accept に text/html）は `/switch` へ 303。それ以外は 409。元のページへの自動復帰は行いません。
-- 選択はランダムなセッション ID にひも付け、メモリ内に保持します。`swittp_session` Cookie は HttpOnly、SameSite=Strict、Path=/。ローカル HTTP 用のため Secure は付きません。セッションは作成から 12 時間、最大 1024 件。再起動で選択は失われます。Cookie の上書きを防ぐため、上流の同名 Set-Cookie は除きます。
+- 選択はランダムなセッション ID とアクセスした Origin にひも付け、メモリ内に保持します。`swittp_session` Cookie は HttpOnly、SameSite=Strict、Path=/、Domain 未指定。設定上 HTTPS の外部 Origin では Secure を付けます。ローカルおよび明示設定した HTTP Origin では付けません。別 Origin へのセッション流用は拒否します。同じホストの別ポートでは Cookie 自体を共有するブラウザ仕様のため、複数ポートを使うと再選択が必要になり得ます。セッションは作成から 12 時間、最大 1024 件。再起動で選択は失われます。上流の同名 Set-Cookie は除きます。
 - セッション Cookie は上流に送りません。それ以外のアプリ Cookie、Authorization などは通常どおり転送します。
-- リクエスト Host は設定したアドレスまたは同じポートの `localhost` のみ許可します。使うホスト名は統一してください。Origin がある場合はアクセスした `http://Host` と完全一致が必要です。cross-site の Fetch Metadata も拒否します。
-- 選択変更には POST、同一 Origin ヘッダー、セッション内の CSRF トークンが必要です。外部サイトの CORS アクセスを許可しません。受信した `Forwarded`、`X-Forwarded-*`、`X-Real-IP` は上流に渡さず、新たな転送元情報も付けません。
+- リクエスト Host は待ち受けアドレス、同じポートの `localhost`、または `external_origins` の Host だけを許可します。Origin がある場合は、その Host に対応した設定上の Origin と完全一致が必要です。別の許可済み Origin であっても使い回せません。cross-site の Fetch Metadata も拒否します。
+- 選択変更には POST、同一 Origin ヘッダー、セッション内の CSRF トークンが必要です。外部サイトの CORS アクセスを許可しません。受信した `Forwarded`、`X-Forwarded-*`、`X-Real-IP` は除去します。明示登録した外部 Host では、設定から `X-Forwarded-Host` と `X-Forwarded-Proto` を作り直します。ローカル Host ではこれらを付けません。利用者の IP や認証情報は転送ヘッダーから推測しません。
 - 上流に接続できない場合は 502。レスポンスヘッダー待ちは最大 30 秒。SSE は即時フラッシュし、WebSocket は ReverseProxy の Upgrade トンネルを使用します。ストリーミングを妨げる全体の書き込みタイムアウトは設けていません。
 
 ## 重要な制約
@@ -49,7 +50,32 @@ go build -o swittp.exe .
 3. **CSRF 対策は同一オリジンの上流アプリから管理画面を守れません。** 上流の JavaScript は管理画面を読み、選択変更できます。HttpOnly も、この信頼境界を作るものではありません。ローカルの他プロセスからの利用も認証していません。
 4. レスポンスに `Cache-Control: no-store` を指定し、上流へ `If-None-Match` / `If-Modified-Since` を送らないことで以前の上流のキャッシュ再利用を抑制します。ただし既存キャッシュ、独自の Cache API、Service Worker の横取りは解消できません。**ブラウザデータの自動削除はしません。** 上流からの `Clear-Site-Data` も除去します。
 5. 絶対 URL、外部向けリダイレクト、Cookie の Domain / Path、上流が返す CSP、Origin 検証、OAuth コールバックなどは書き換えません。上流にはプロキシの Origin が届くため、許可 Origin の設定が必要なことがあります。上流の専用 URL に移動してしまう場合もあります。「どのサービスでも完全に透過的に切り替えられる」とは保証しません。
-6. ループバック待ち受けをトンネル、別プロキシ、ポート転送で公開しないでください。CSRF があっても認証・TLS・公開用アクセス制御が完成したことにはなりません。ファイアウォールや Tailscale の設定変更、常駐化は行いません。
+6. 外部 Origin の登録は認証ではありません。外側のプロキシには、設定した HTTPS の終端、元の Host の保持、利用者のアクセス制御を任せます。swittp は受信ヘッダーから TLS や Tailscale 利用者を認証しません。ループバックへ接続できるプロセスは Host を指定できるため、ローカルプロセスも信頼する前提です。認証されていないインターネット公開や Funnel は想定していません。CSRF があっても公開用の認証基盤が完成したことにはなりません。
+
+## Tailscale Serve で使う場合
+
+Tailscale Serve の HTTPS 終端から、元の Host を保ったまま `http://127.0.0.1:8787` に中継する構成に対応します。Serve は tailnet 内で共有する機能です。利用できる人を既存の tailnet アクセス制御で限定してください。詳細は [Serve の公式説明](https://tailscale.com/docs/features/tailscale-serve) を参照してください。
+
+1. 未作成の場合だけ `config.tailscale.example.json` を `config.json` にコピーします。既存の設定は上書きせず編集してください。
+2. `external_origins` の `https://your-device.your-tailnet.ts.net` を、実際にブラウザで開く HTTPS Origin に置き換えます。`/switch` や末尾 `/` は含めません。上流サービスも自分の環境に合わせます。
+3. 修正版をビルドして swittp を起動します。更新時は利用者が既存プロセスを終了してから起動してください。
+
+```powershell
+go build -o swittp.exe .
+.\swittp.exe -config config.json
+```
+
+別端末での Serve 設定例（既に設定済みなら重ねて実行する必要はありません）:
+
+```powershell
+tailscale serve --bg 8787
+```
+
+ブラウザで `https://実際の端末名.実際のtailnet.ts.net/switch` を開きます。swittp 全体をルートに置くため `--set-path /switch` は使いません。`listen` を Tailscale IP に変更する必要はありません。Host の書き換えや Origin の削除で検証を回避しないでください。
+
+上流には上流自身の Host と、ブラウザの元の Origin が届きます。外部 HTTPS の情報は上記の2つの転送ヘッダーで伝えますが、それを利用するかは上流アプリ次第です。上流側にも正しい外部 URL・信頼するプロキシ・許可 Origin の設定が必要な場合があります。Origin、Location、HTML 内の URL は自動で書き換えません。
+
+開発時の検証は HTTP ループバックの模擬プロキシで外部 Host/Origin を渡す統合テストです。実際の Tailscale やブラウザの TLS・Cookie 挙動を検証したものではありません。利用者の実ホスト名と実行時設定は変更していません。
 
 ## 検証
 
@@ -75,4 +101,4 @@ Windows の race 検証には CGO と対応 C コンパイラが必要です。�
 
 管理画面の `Referrer-Policy` は `same-origin` とします。以前の `no-referrer` は、通常のフォーム POST の `Origin` を `null` にするため、正しいセッションと CSRF トークンがあっても選択操作が拒否される原因になります。POST 必須、Origin 検証、CSRF トークン検証は維持しています。
 
-回帰テストは HTTP ヘッダーを明示して送るモックテストです。拒否された POST が選択を変更せず、正常な POST が 303 を返して続くルート GET が上流に届くことを確認しています。実ブラウザでの再現確認と、報告者が使用したアクセス URL の確認は未完了です。HTTPS 終端や外部 Host の対応を追加した修正ではありません。
+この回帰テストは HTTP ヘッダーを明示して送るモックテストです。拒否された POST が選択を変更せず、正常な POST が 303 を返して続くルート GET が上流に届くことを確認しています。実ブラウザでの再現確認は未完了です。後続の外部 Host 対応は `external_origins` で明示設定します。

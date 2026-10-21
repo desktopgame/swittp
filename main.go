@@ -33,24 +33,84 @@ type service struct {
 }
 
 type config struct {
-	Listen   string    `json:"listen"`
-	Services []service `json:"services"`
+	Listen          string    `json:"listen"`
+	Services        []service `json:"services"`
+	ExternalOrigins []string  `json:"external_origins,omitempty"`
 }
 
 type session struct {
 	ID, CSRF, Selected string
+	Origin             string
 	Expires            time.Time
 }
 
 type app struct {
 	config   config
-	hosts    map[string]bool
+	origins  map[string]string // Exact Host -> configured browser origin; never inferred from forwarded headers.
 	proxies  map[string]*httputil.ReverseProxy
 	mu       sync.Mutex
 	sessions map[string]session
 }
 
 var idPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+var dnsLabelPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
+var numericHostLabelPattern = regexp.MustCompile(`^(?:[0-9]+|0x[0-9a-f]+)$`)
+
+// Require the serialized origin browsers send: no path (even /), default port,
+// wildcard, credentials or alternate spelling. This makes Host/Origin matching explicit.
+func parseExternalOrigin(raw string) (*url.URL, error) {
+	u, err := url.Parse(raw)
+	invalid := func() (*url.URL, error) {
+		return nil, fmt.Errorf("invalid external origin %q: use an exact lowercase http(s) origin without path, credentials, query, fragment or default port", raw)
+	}
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || raw != u.Scheme+"://"+u.Host || u.Host != strings.ToLower(u.Host) {
+		return invalid()
+	}
+	host := u.Hostname()
+	if ip := net.ParseIP(host); ip != nil {
+		if host != ip.String() {
+			return invalid()
+		}
+	} else {
+		if strings.ContainsAny(u.Host, "[]") {
+			return invalid()
+		}
+		if len(host) > 253 {
+			return invalid()
+		}
+		labels := strings.Split(host, ".")
+		// Browsers interpret numeric final labels as IPv4, sometimes normalizing
+		// shorthand, octal or hex spellings. Only canonical IP literals are accepted.
+		if numericHostLabelPattern.MatchString(labels[len(labels)-1]) {
+			return invalid()
+		}
+		for _, label := range labels {
+			if !dnsLabelPattern.MatchString(label) {
+				return invalid()
+			}
+		}
+	}
+	if strings.HasSuffix(u.Host, ":") {
+		return invalid()
+	}
+	if port := u.Port(); port != "" {
+		p, err := strconv.Atoi(port)
+		if err != nil || p < 1 || p > 65535 || strconv.Itoa(p) != port || (u.Scheme == "http" && p == 80) || (u.Scheme == "https" && p == 443) {
+			return invalid()
+		}
+	}
+	authority := host
+	if strings.Contains(host, ":") {
+		authority = "[" + host + "]"
+	}
+	if u.Port() != "" {
+		authority = net.JoinHostPort(host, u.Port())
+	}
+	if u.Host != authority {
+		return invalid()
+	}
+	return u, nil
+}
 
 func newApp(c config) (*app, error) {
 	host, port, err := net.SplitHostPort(c.Listen)
@@ -64,7 +124,17 @@ func newApp(c config) (*app, error) {
 	if len(c.Services) == 0 {
 		return nil, errors.New("at least one service is required")
 	}
-	a := &app{config: c, hosts: map[string]bool{c.Listen: true, net.JoinHostPort("localhost", port): true}, proxies: make(map[string]*httputil.ReverseProxy), sessions: make(map[string]session)}
+	a := &app{config: c, origins: map[string]string{c.Listen: "http://" + c.Listen, net.JoinHostPort("localhost", port): "http://" + net.JoinHostPort("localhost", port)}, proxies: make(map[string]*httputil.ReverseProxy), sessions: make(map[string]session)}
+	for _, origin := range c.ExternalOrigins {
+		u, err := parseExternalOrigin(origin)
+		if err != nil {
+			return nil, err
+		}
+		if _, exists := a.origins[u.Host]; exists {
+			return nil, fmt.Errorf("duplicate or conflicting origin host: %s", u.Host)
+		}
+		a.origins[u.Host] = origin
+	}
 	for _, s := range c.Services {
 		u, err := url.Parse(s.URL)
 		if !idPattern.MatchString(s.ID) || a.proxies[s.ID] != nil || s.Name == "" {
@@ -87,6 +157,11 @@ func newApp(c config) (*app, error) {
 					}
 				}
 				pr.SetURL(u)
+				// External context is fixed by configuration, not by caller-supplied proxy headers.
+				if external := a.origins[pr.In.Host]; external != "http://"+c.Listen && external != "http://"+net.JoinHostPort("localhost", port) {
+					pr.Out.Header.Set("X-Forwarded-Host", pr.In.Host)
+					pr.Out.Header.Set("X-Forwarded-Proto", strings.SplitN(external, ":", 2)[0])
+				}
 				// SetURL preserves paths; restore raw query even when it contains semicolons.
 				pr.Out.URL.RawQuery = pr.In.URL.RawQuery
 				pr.Out.Header.Del("Cookie")
@@ -138,10 +213,10 @@ func (a *app) getSession(r *http.Request) (session, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	s, ok := a.sessions[ck.Value]
-	return s, ok && time.Now().Before(s.Expires)
+	return s, ok && time.Now().Before(s.Expires) && s.Origin == a.origins[r.Host]
 }
 
-func (a *app) createSession(w http.ResponseWriter) (session, bool) {
+func (a *app) createSession(w http.ResponseWriter, r *http.Request) (session, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	now := time.Now()
@@ -154,20 +229,22 @@ func (a *app) createSession(w http.ResponseWriter) (session, bool) {
 		http.Error(w, "session capacity reached; try later", http.StatusServiceUnavailable)
 		return session{}, false
 	}
-	s := session{ID: token(), CSRF: token(), Expires: now.Add(sessionTTL)}
+	origin := a.origins[r.Host]
+	s := session{ID: token(), CSRF: token(), Origin: origin, Expires: now.Add(sessionTTL)}
 	a.sessions[s.ID] = s
-	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: s.ID, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: int(sessionTTL.Seconds())})
+	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: s.ID, Path: "/", HttpOnly: true, Secure: strings.HasPrefix(origin, "https://"), SameSite: http.SameSiteStrictMode, MaxAge: int(sessionTTL.Seconds())})
 	return s, true
 }
 
 func (a *app) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
-	if !a.hosts[r.Host] || r.URL.IsAbs() {
+	expectedOrigin, allowed := a.origins[r.Host]
+	if !allowed || r.URL.IsAbs() {
 		http.Error(w, "invalid host or request target", http.StatusBadRequest)
 		return
 	}
 	// Block cross-site browser requests, including requests to the upstream.
-	if origin := r.Header.Get("Origin"); origin != "" && origin != "http://"+r.Host {
+	if origin := r.Header.Get("Origin"); len(r.Header.Values("Origin")) > 1 || (origin != "" && origin != expectedOrigin) {
 		http.Error(w, "cross-origin request rejected", http.StatusForbidden)
 		return
 	}
@@ -211,7 +288,7 @@ func (a *app) manage(w http.ResponseWriter, r *http.Request, s session, ok bool)
 			return
 		}
 		if !ok {
-			s, ok = a.createSession(w)
+			s, ok = a.createSession(w, r)
 			if !ok {
 				return
 			}
@@ -229,7 +306,7 @@ func (a *app) manage(w http.ResponseWriter, r *http.Request, s session, ok bool)
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		if !ok || r.Header.Get("Origin") != "http://"+r.Host {
+		if !ok || r.Header.Get("Origin") != a.origins[r.Host] {
 			http.Error(w, "session and same-origin Origin required", http.StatusForbidden)
 			return
 		}

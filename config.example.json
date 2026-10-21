@@ -1,5 +1,6 @@
 {
   "listen": "127.0.0.1:8787",
+  "external_origins": [],
   "services": [
     {"id": "app-a", "name": "ローカルアプリ A", "url": "http://127.0.0.1:3000"},
     {"id": "app-b", "name": "ローカルアプリ B", "url": "http://127.0.0.1:8080"}
